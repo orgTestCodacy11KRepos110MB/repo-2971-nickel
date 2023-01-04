@@ -819,7 +819,8 @@ fn walk<L: Linearizer>(
                 ctxt.type_env.insert(*id, binding_type(state, t.as_ref(), &ctxt, false));
             }
 
-            inject_pat_vars(pat, &mut ctxt.type_env);
+            // TODO(MH): injecting dyn while walking is _probably_ fine, but check this
+            inject_pattern_variables(&state, &mut ctxt.type_env, pat, &mk_uniftype::dynamic());
             walk(state, ctxt, lin, linearizer, t)
         }
         Term::Array(terms, _) => terms
@@ -861,7 +862,8 @@ fn walk<L: Linearizer>(
                 ctxt.type_env.insert(*x, ty_let);
             }
 
-            inject_pat_vars(pat, &mut ctxt.type_env);
+            // TODO(MH): injecting dyn while walking is _probably_ fine, but check this
+            inject_pattern_variables(&state, &mut ctxt.type_env, pat, &mk_uniftype::dynamic());
 
             walk(state, ctxt, lin, linearizer, rt)
         }
@@ -1000,23 +1002,152 @@ fn walk_rrows<L: Linearizer>(
     }
 }
 
-// TODO: The insertion of values in the type environment is done but everything is
-// typed as `Dyn`.
-fn inject_pat_vars(pat: &Destruct, env: &mut Environment) {
-    if let Destruct::Record { matches, rest, .. } = pat {
-        if let Some(id) = rest {
-            env.insert(*id, UnifType::Concrete(TypeF::Dyn));
-        }
-        matches.iter().for_each(|m| match m {
-            Match::Simple(id, ..) => env.insert(*id, UnifType::Concrete(TypeF::Dyn)),
-            Match::Assign(id, _, (bind_id, pat)) => {
-                let id = bind_id.as_ref().unwrap_or(id);
-                env.insert(*id, UnifType::Concrete(TypeF::Dyn));
-                if !pat.is_empty() {
-                    inject_pat_vars(pat, env);
+/// Extend `env` with any new bindings brought into scope in `pat`. The types of
+/// these bindings will be inferred from `pat_ty`, i.e.,
+fn inject_pattern_variables(
+    state: &State,
+    env: &mut Environment,
+    pat: &Destruct,
+    pat_ty: &UnifType,
+) {
+    let pat_ty = pat_ty.clone().into_root(&state.table);
+
+    enum DestructTypeMap {
+        Rows(HashMap<Ident, UnifType>, UnifRecordRows),
+        Dyn,
+    }
+
+    impl From<&UnifType> for DestructTypeMap {
+        fn from(value: &UnifType) -> Self {
+            match value {
+                GenericUnifType::Concrete(TypeF::Record(t)) => {
+                    let (tys, tail) =
+                        t.iter()
+                            .fold((HashMap::new(), None), |(mut m, _), ty| match ty {
+                                GenericUnifRecordRowsIteratorItem::Row(rt) => {
+                                    m.insert(rt.id.clone(), rt.types.clone());
+                                    (m, None)
+                                }
+                                GenericUnifRecordRowsIteratorItem::TailDyn => {
+                                    (m, Some(UnifRecordRows::Concrete(RecordRowsF::TailDyn)))
+                                }
+                                GenericUnifRecordRowsIteratorItem::TailVar(v) => {
+                                    (m, Some(UnifRecordRows::Concrete(RecordRowsF::TailVar(*v))))
+                                }
+                                GenericUnifRecordRowsIteratorItem::TailUnifVar(n) => {
+                                    (m, Some(UnifRecordRows::UnifVar(n)))
+                                }
+                                GenericUnifRecordRowsIteratorItem::TailConstant(n) => {
+                                    (m, Some(UnifRecordRows::Constant(n)))
+                                }
+                            });
+                    DestructTypeMap::Rows(
+                        tys,
+                        tail.unwrap_or(UnifRecordRows::Concrete(RecordRowsF::Empty)),
+                    )
                 }
+                _ => DestructTypeMap::Dyn,
             }
-        });
+        }
+    }
+
+    impl DestructTypeMap {
+        fn get_type(&mut self, id: &Ident) -> UnifType {
+            match self {
+                DestructTypeMap::Rows(h, _) => h.remove(id).unwrap(), //TODO(MH): justify this unwrap
+                DestructTypeMap::Dyn => mk_uniftype::dynamic(),
+            }
+        }
+
+        fn rest(self) -> UnifType {
+            match self {
+                DestructTypeMap::Rows(h, t) => {
+                    let rows = h.iter().map(|(id, ty)| RecordRowF {
+                        id: *id,
+                        types: Box::new(ty.clone()),
+                    });
+                    let rrows = rows.fold(t, |tail, row| {
+                        UnifRecordRows::Concrete(RecordRowsF::Extend {
+                            row,
+                            tail: Box::new(tail),
+                        })
+                    });
+                    UnifType::Concrete(TypeF::Record(rrows))
+                }
+                DestructTypeMap::Dyn => mk_uniftype::dyn_record(mk_uniftype::dynamic()),
+            }
+        }
+    }
+
+    match pat {
+        Destruct::Record { matches, rest, .. } => {
+            // assign types to matches based on uniftype
+            let mut type_map = DestructTypeMap::from(&pat_ty);
+            matches.iter().for_each(|m| match m {
+                Match::Simple(id, ..) => {
+                    let ty = type_map.get_type(id);
+                    println!("Assigning match {id} type {:?}", ty);
+                    env.insert(*id, ty);
+                }
+                Match::Assign(id, _, (bind_id, pat)) => {
+                    let ty = type_map.get_type(id);
+                    println!("Assigning match {id}, binding {bind_id:?} type {:?}", ty);
+                    let id = bind_id.as_ref().unwrap_or(id);
+                    env.insert(*id, ty.clone());
+                    if !pat.is_empty() {
+                        inject_pattern_variables(state, env, pat, &ty);
+                    }
+                }
+            });
+
+            if let Some(id) = rest {
+                let rest_ty = type_map.rest();
+                env.insert(*id, rest_ty);
+            }
+        }
+        Destruct::Empty => (),
+    }
+}
+
+fn build_pattern_type(state: &mut State, pat: &Destruct) -> UnifType {
+    match pat {
+        Destruct::Record { matches, open, .. } => {
+            let tail = if *open {
+                state.table.fresh_rrows_uvar()
+            } else {
+                UnifRecordRows::Concrete(RecordRowsF::Empty)
+            };
+
+            // TODO: use attached types/contracts from metavalues
+            let rows = matches.iter().map(|m| match m {
+                Match::Simple(id, _mv) => RecordRowF {
+                    id: *id,
+                    types: Box::new(state.table.fresh_type_uvar()),
+                },
+                Match::Assign(id, _, (_, Destruct::Empty)) => RecordRowF {
+                    id: *id,
+                    types: Box::new(state.table.fresh_type_uvar()),
+                },
+                Match::Assign(id, _, (_, r_pat @ Destruct::Record { .. })) => {
+                    // the type implied by a pattern like `x = { a, b }` is `x : pattern_type({ a, b })
+                    let ty = build_pattern_type(state, r_pat);
+                    RecordRowF {
+                        id: *id,
+                        types: Box::new(ty),
+                    }
+                }
+            });
+
+            let rrows = rows.fold(tail, |tail, row| {
+                UnifRecordRows::Concrete(RecordRowsF::Extend {
+                    row,
+                    tail: Box::new(tail),
+                })
+            });
+
+            UnifType::Concrete(TypeF::Record(rrows))
+        }
+        Destruct::Empty => state.table.fresh_type_uvar(),
     }
 }
 
@@ -1089,16 +1220,16 @@ fn type_check_<L: Linearizer>(
             type_check_(state, ctxt, lin, linearizer, t, trg)
         }
         Term::FunPattern(x, pat, t) => {
-            let src = state.table.fresh_type_uvar();
             // TODO what to do here, this makes more sense to me, but it means let x = foo in bar
             // behaves quite different to (\x.bar) foo, worth considering if it's ok to type these two differently
+            let src = build_pattern_type(state, pat);
             let trg = state.table.fresh_type_uvar();
             let arr = mk_uty_arrow!(src.clone(), trg.clone());
             if let Some(x) = x {
                 linearizer.retype_ident(lin, x, src.clone());
-                ctxt.type_env.insert(*x, src);
+                ctxt.type_env.insert(*x, src.clone());
             }
-            inject_pat_vars(pat, &mut ctxt.type_env);
+            inject_pattern_variables(&state, &mut ctxt.type_env, pat, &src);
             unify(state, &ctxt, ty, arr).map_err(|err| err.into_typecheck_err(state, rt.pos))?;
             type_check_(state, ctxt, lin, linearizer, t, trg)
         }
@@ -1155,7 +1286,12 @@ fn type_check_<L: Linearizer>(
             type_check_(state, ctxt, lin, linearizer, rt, ty)
         }
         Term::LetPattern(x, pat, re, rt) => {
+            // The inferred type of the pattern w/ unification vars
+            let pattern_type = build_pattern_type(state, pat);
+            // The type we think the bound expr is
             let ty_let = binding_type(state, re.as_ref(), &ctxt, true);
+            unify(state, &ctxt, ty_let.clone(), pattern_type)
+                .map_err(|e| e.into_typecheck_err(state, re.pos))?;
             type_check_(
                 state,
                 ctxt.clone(),
@@ -1167,9 +1303,9 @@ fn type_check_<L: Linearizer>(
 
             if let Some(x) = x {
                 linearizer.retype_ident(lin, x, ty_let.clone());
-                ctxt.type_env.insert(*x, ty_let);
+                ctxt.type_env.insert(*x, ty_let.clone());
             }
-            inject_pat_vars(pat, &mut ctxt.type_env);
+            inject_pattern_variables(&state, &mut ctxt.type_env, pat, &ty_let);
             type_check_(state, ctxt, lin, linearizer, rt, ty)
         }
         Term::App(e, t) => {
@@ -1833,6 +1969,9 @@ pub fn unify(
                 })
             }
             (TypeF::Record(rrows1), TypeF::Record(rrows2)) => {
+                println!("Unifying");
+                println!("Left: {rrows1:?}");
+                println!("Right: {rrows2:?}");
                 unify_rrows(state, ctxt, rrows1.clone(), rrows2.clone()).map_err(|err| {
                     err.into_unif_err(mk_uty_record!(; rrows1), mk_uty_record!(; rrows2))
                 })
