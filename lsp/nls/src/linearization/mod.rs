@@ -67,6 +67,7 @@ pub struct AnalysisHost<'a> {
     /// useable to construct a vale declaration.
     record_fields: Option<(ItemId, Vec<(ItemId, Ident)>)>,
     let_binding: Option<ItemId>,
+    let_pattern_binding: Option<Vec<ItemId>>,
     /// Accesses to nested records are recorded recursively.
     /// ```
     /// outer.middle.inner -> inner(middle(outer))
@@ -86,6 +87,7 @@ impl<'a> AnalysisHost<'a> {
             meta: Default::default(),
             record_fields: Default::default(),
             let_binding: Default::default(),
+            let_pattern_binding: Default::default(),
             access: Default::default(),
         }
     }
@@ -572,6 +574,7 @@ impl<'a> Linearizer for AnalysisHost<'a> {
                 Some(*record).zip(fields.pop().map(|field| vec![field]))
             }),
             let_binding: self.let_binding.take(),
+            let_pattern_binding: self.let_pattern_binding.take(),
             access: self.access.clone(),
         }
     }
@@ -589,6 +592,7 @@ impl<'a> Linearizer for AnalysisHost<'a> {
             meta: None,
             record_fields: None,
             let_binding: None,
+            let_pattern_binding: None,
             access: None,
         }
     }
