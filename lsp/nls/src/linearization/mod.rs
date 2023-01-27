@@ -241,6 +241,8 @@ impl<'a> Linearizer for AnalysisHost<'a> {
                         meta: None,
                     });
                 }
+
+                let mut let_pattern_bindings = Vec::new();
                 for matched in destruct.to_owned().inner() {
                     let (ident, term) = matched.as_meta_field();
 
@@ -248,6 +250,8 @@ impl<'a> Linearizer for AnalysisHost<'a> {
                         file_id: self.file,
                         index: id_gen.get_and_advance(),
                     };
+
+                    let_pattern_bindings.push(id);
                     self.env.insert(ident, id);
                     lin.push(LinearizationItem {
                         env: self.env.clone(),
@@ -258,7 +262,7 @@ impl<'a> Linearizer for AnalysisHost<'a> {
                         kind: TermKind::Declaration(
                             ident.to_owned(),
                             Vec::new(),
-                            ValueState::Known(id),
+                            ValueState::Unknown,
                             true,
                         ),
                         meta: match &*term.term {
@@ -270,6 +274,7 @@ impl<'a> Linearizer for AnalysisHost<'a> {
                         },
                     });
                 }
+                self.let_pattern_binding = Some(let_pattern_bindings);
             }
             Term::Let(ident, ..) | Term::Fun(ident, ..) => {
                 let value_ptr = match term {
