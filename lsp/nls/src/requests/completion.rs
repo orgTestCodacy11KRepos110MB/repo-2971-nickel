@@ -169,7 +169,7 @@ fn find_fields_from_term_kind(
             value: ValueState::Known(new_id),
             ..
         }
-        | TermKind::Declaration(_, _, ValueState::Known(new_id)) => {
+        | TermKind::Declaration(_, _, ValueState::Known(new_id), _) => {
             find_fields_from_term_kind(new_id, path, info)
         }
         TermKind::Usage(UsageState::Resolved(new_id)) => {
@@ -198,7 +198,7 @@ fn find_fields_from_contract(
     match &item.meta {
         Some(meta_value) => find_fields_from_meta_value(meta_value, path, info),
         None => match item.kind {
-            TermKind::Declaration(_, _, ValueState::Known(new_id))
+            TermKind::Declaration(_, _, ValueState::Known(new_id), _)
             | TermKind::Usage(UsageState::Resolved(new_id)) => {
                 find_fields_from_contract(new_id, path, info)
             }
@@ -403,21 +403,16 @@ fn collect_record_info(
                 // Get record fields from static type info
                 (_, Types(TypeF::Record(rrows))) => find_fields_from_type(&rrows, path, &info),
                 (
-                    TermKind::Declaration(_, _, ValueState::Known(body_id))
+                    TermKind::Declaration(_, _, ValueState::Known(body_id), _)
                     | TermKind::RecordField {
                         value: ValueState::Known(body_id),
                         ..
                     },
                     _,
-                ) => {
-                    // The path is mutable, so the first case would consume the path
-                    // so we have to clone it so that it can be correctly used for the second case.
-                    let mut p = path.clone();
-                    let mut fst = find_fields_from_contract(*body_id, path, &info);
-                    let snd = find_fields_from_term_kind(*body_id, &mut p, &info);
-                    fst.extend(snd);
-                    fst
-                }
+                ) => find_fields_from_contract(*body_id, &mut path.clone(), &info)
+                    .into_iter()
+                    .chain(find_fields_from_term_kind(*body_id, path, &info))
+                    .collect(),
                 _ => Vec::new(),
             }
         })
@@ -561,7 +556,7 @@ fn get_completion_identifiers(
                     .get_in_scope(item, &server.lin_cache)
                     .iter()
                     .filter_map(|i| match i.kind {
-                        TermKind::Declaration(ident, _, _) => Some(IdentWithType {
+                        TermKind::Declaration(ident, _, _, _) => Some(IdentWithType {
                             ident,
                             item: Some(item.clone()),
                             ty: ty.clone(),
@@ -868,6 +863,7 @@ mod tests {
                 Ident::from("a"),
                 vec![ItemId { file_id, index: 3 }],
                 ValueState::Known(ItemId { file_id, index: 1 }),
+                false,
             ),
             None,
         );
@@ -887,6 +883,7 @@ mod tests {
                 Ident::from("d"),
                 Vec::new(),
                 ValueState::Known(ItemId { file_id, index: 4 }),
+                false,
             ),
             None,
         );
@@ -913,6 +910,7 @@ mod tests {
                 Ident::from("a"),
                 Vec::new(),
                 ValueState::Known(ItemId { file_id, index: 1 }),
+                false,
             ),
             None,
         );
@@ -933,6 +931,7 @@ mod tests {
                 Ident::from("d"),
                 Vec::new(),
                 ValueState::Known(ItemId { file_id, index: 13 }),
+                false,
             ),
             None,
         );
@@ -942,6 +941,7 @@ mod tests {
                 Ident::from("e"),
                 Vec::new(),
                 ValueState::Known(ItemId { file_id, index: 14 }),
+                false,
             ),
             None,
         );
@@ -951,6 +951,7 @@ mod tests {
                 Ident::from("f"),
                 Vec::new(),
                 ValueState::Known(ItemId { file_id, index: 15 }),
+                false,
             ),
             None,
         );
@@ -999,6 +1000,7 @@ mod tests {
                 Ident::from("a"),
                 Vec::new(),
                 ValueState::Known(ItemId { file_id, index: 1 }),
+                false,
             ),
             None,
         );

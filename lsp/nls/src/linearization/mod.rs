@@ -206,11 +206,14 @@ impl<'a> Linearizer for AnalysisHost<'a> {
                     self.env.insert(ident.to_owned(), id);
                     let kind = match term {
                         Term::LetPattern(..) => {
-                            TermKind::Declaration(ident.to_owned(), Vec::new(), value_ptr)
+                            TermKind::Declaration(ident.to_owned(), Vec::new(), value_ptr, true)
                         }
-                        Term::FunPattern(..) => {
-                            TermKind::Declaration(ident.to_owned(), Vec::new(), ValueState::Unknown)
-                        }
+                        Term::FunPattern(..) => TermKind::Declaration(
+                            ident.to_owned(),
+                            Vec::new(),
+                            ValueState::Unknown,
+                            true,
+                        ),
                         _ => unreachable!(),
                     };
                     lin.push(LinearizationItem {
@@ -240,6 +243,7 @@ impl<'a> Linearizer for AnalysisHost<'a> {
                             ident.to_owned(),
                             Vec::new(),
                             ValueState::Known(id),
+                            true,
                         ),
                         meta: match &*term.term {
                             Term::MetaValue(meta) => Some(MetaValue {
@@ -287,10 +291,15 @@ impl<'a> Linearizer for AnalysisHost<'a> {
                     },
                 );
                 let kind = match term {
-                    Term::Let(..) => TermKind::Declaration(ident.to_owned(), Vec::new(), value_ptr),
-                    Term::Fun(..) => {
-                        TermKind::Declaration(ident.to_owned(), Vec::new(), ValueState::Unknown)
+                    Term::Let(..) => {
+                        TermKind::Declaration(ident.to_owned(), Vec::new(), value_ptr, false)
                     }
+                    Term::Fun(..) => TermKind::Declaration(
+                        ident.to_owned(),
+                        Vec::new(),
+                        ValueState::Unknown,
+                        false,
+                    ),
                     _ => unreachable!(),
                 };
                 lin.push(LinearizationItem {
